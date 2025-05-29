@@ -3,25 +3,66 @@ from diffusers.utils import load_image, make_image_grid
 from PIL import Image
 import cv2
 import numpy as np
-from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UniPCMultistepScheduler
+from diffusers import (
+    StableDiffusionControlNetPipeline,
+    StableDiffusionControlNetImg2ImgPipeline,
+    ControlNetModel,
+    UniPCMultistepScheduler
+)
+from transformers import pipeline
 import torch
 
-def load_models():
+def load_canny_models():
     controlnet = ControlNetModel.from_pretrained(
         "lllyasviel/sd-controlnet-canny",
-        torch_dtype=torch.float32,  # Use float32 for CPU
+        torch_dtype=torch.float32,
         use_safetensors=True
     )
     pipe = StableDiffusionControlNetPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5",
         controlnet=controlnet,
-        torch_dtype=torch.float32,  # Use float32 for CPU
+        torch_dtype=torch.float32,
         use_safetensors=True
     )
     pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
     return pipe
 
-def process_image(image, low_threshold, high_threshold, prompt, negative_prompt, num_inference_steps, guidance_scale):
+def load_depth_models():
+    depth_estimator = pipeline("depth-estimation")
+    controlnet = ControlNetModel.from_pretrained(
+        "lllyasviel/control_v11f1p_sd15_depth",
+        torch_dtype=torch.float32,
+        use_safetensors=True
+    )
+    pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5",
+        controlnet=controlnet,
+        torch_dtype=torch.float32,
+        use_safetensors=True
+    )
+    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+    return pipe, depth_estimator
+
+def get_depth_map(image, depth_estimator):
+    # Convert PIL image to RGB if it's not
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    
+    # Get depth map
+    depth_map = depth_estimator(image)["depth"]
+    
+    # Convert to numpy array and normalize
+    depth_map = np.array(depth_map)
+    depth_map = depth_map[:, :, None]
+    depth_map = np.concatenate([depth_map, depth_map, depth_map], axis=2)
+    
+    # Convert to tensor and normalize
+    depth_map = torch.from_numpy(depth_map).float() / 255.0
+    depth_map = depth_map.permute(2, 0, 1).unsqueeze(0)
+    
+    return depth_map
+
+def process_canny(image, low_threshold, high_threshold, prompt, negative_prompt, num_inference_steps, guidance_scale):
     # Convert to numpy array and apply Canny edge detection
     image = np.array(image)
     image = cv2.Canny(image, low_threshold, high_threshold)
@@ -30,7 +71,7 @@ def process_image(image, low_threshold, high_threshold, prompt, negative_prompt,
     canny_image = Image.fromarray(image)
     
     # Generate new image
-    pipe = load_models()
+    pipe = load_canny_models()
     output = pipe(
         prompt=prompt,
         negative_prompt=negative_prompt,
@@ -44,49 +85,109 @@ def process_image(image, low_threshold, high_threshold, prompt, negative_prompt,
     
     return canny_image, output, grid
 
+def process_depth(image, prompt, negative_prompt, num_inference_steps, guidance_scale, strength):
+    # Get depth map
+    pipe, depth_estimator = load_depth_models()
+    depth_map = get_depth_map(image, depth_estimator)
+    
+    # Generate new image
+    output = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        image=image,
+        control_image=depth_map,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        strength=strength
+    ).images[0]
+    
+    # Create image grid
+    grid = make_image_grid([image, output], rows=1, cols=2)
+    
+    return output, grid
+
 # Create the Gradio interface
-with gr.Blocks(title="ControlNet Canny Edge Detection") as demo:
-    gr.Markdown("# ControlNet Canny Edge Detection")
+with gr.Blocks(title="ControlNet Image Generation") as demo:
+    gr.Markdown("# ControlNet Image Generation")
     gr.Markdown("⚠️ Running on CPU - Generation will be slower")
     
-    with gr.Row():
-        with gr.Column():
-            input_image = gr.Image(label="Input Image", type="pil")
+    with gr.Tabs():
+        with gr.TabItem("Canny Edge Detection"):
+            with gr.Row():
+                with gr.Column():
+                    canny_input = gr.Image(label="Input Image", type="pil")
+                    
+                    with gr.Accordion("Parameters", open=True):
+                        low_threshold = gr.Slider(0, 255, value=100, label="Low Threshold")
+                        high_threshold = gr.Slider(0, 255, value=200, label="High Threshold")
+                        prompt = gr.Textbox(
+                            label="Prompt",
+                            value="the mona lisa, masterpiece, best quality, extremely detailed"
+                        )
+                        negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value="lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
+                        )
+                        num_inference_steps = gr.Slider(20, 50, value=30, label="Number of Inference Steps")
+                        guidance_scale = gr.Slider(1.0, 20.0, value=7.5, label="Guidance Scale")
+                    
+                    canny_generate_btn = gr.Button("Generate Image")
+                
+                with gr.Column():
+                    canny_output = gr.Image(label="Canny Edge Detection", type="pil")
+                    canny_generated = gr.Image(label="Generated Image", type="pil")
+                    canny_grid = gr.Image(label="Image Grid", type="pil")
             
-            with gr.Accordion("Parameters", open=True):
-                low_threshold = gr.Slider(0, 255, value=100, label="Low Threshold")
-                high_threshold = gr.Slider(0, 255, value=200, label="High Threshold")
-                prompt = gr.Textbox(
-                    label="Prompt",
-                    value="the mona lisa, masterpiece, best quality, extremely detailed"
-                )
-                negative_prompt = gr.Textbox(
-                    label="Negative Prompt",
-                    value="lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
-                )
-                num_inference_steps = gr.Slider(20, 50, value=30, label="Number of Inference Steps")
-                guidance_scale = gr.Slider(1.0, 20.0, value=7.5, label="Guidance Scale")
-            
-            generate_btn = gr.Button("Generate Image")
+            canny_generate_btn.click(
+                fn=process_canny,
+                inputs=[
+                    canny_input,
+                    low_threshold,
+                    high_threshold,
+                    prompt,
+                    negative_prompt,
+                    num_inference_steps,
+                    guidance_scale
+                ],
+                outputs=[canny_output, canny_generated, canny_grid]
+            )
         
-        with gr.Column():
-            canny_output = gr.Image(label="Canny Edge Detection", type="pil")
-            generated_output = gr.Image(label="Generated Image", type="pil")
-            grid_output = gr.Image(label="Image Grid", type="pil")
-    
-    generate_btn.click(
-        fn=process_image,
-        inputs=[
-            input_image,
-            low_threshold,
-            high_threshold,
-            prompt,
-            negative_prompt,
-            num_inference_steps,
-            guidance_scale
-        ],
-        outputs=[canny_output, generated_output, grid_output]
-    )
+        with gr.TabItem("Depth Image-to-Image"):
+            with gr.Row():
+                with gr.Column():
+                    depth_input = gr.Image(label="Input Image", type="pil")
+                    
+                    with gr.Accordion("Parameters", open=True):
+                        depth_prompt = gr.Textbox(
+                            label="Prompt",
+                            value="lego batman and robin, masterpiece, best quality, extremely detailed"
+                        )
+                        depth_negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value="lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
+                        )
+                        depth_num_inference_steps = gr.Slider(20, 50, value=30, label="Number of Inference Steps")
+                        depth_guidance_scale = gr.Slider(1.0, 20.0, value=7.5, label="Guidance Scale")
+                        strength = gr.Slider(0.0, 1.0, value=0.8, label="Strength")
+                    
+                    depth_generate_btn = gr.Button("Generate Image")
+                
+                with gr.Column():
+                    depth_generated = gr.Image(label="Generated Image", type="pil")
+                    depth_grid = gr.Image(label="Image Grid", type="pil")
+            
+            depth_generate_btn.click(
+                fn=process_depth,
+                inputs=[
+                    depth_input,
+                    depth_prompt,
+                    depth_negative_prompt,
+                    depth_num_inference_steps,
+                    depth_guidance_scale,
+                    strength
+                ],
+                outputs=[depth_generated, depth_grid]
+            )
 
 if __name__ == "__main__":
     demo.launch() 
