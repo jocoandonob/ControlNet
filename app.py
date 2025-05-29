@@ -158,6 +158,28 @@ def process_inpaint(image, mask, prompt, negative_prompt, num_inference_steps, g
     
     return output, grid
 
+def process_guess(image, low_threshold, high_threshold, guidance_scale):
+    # Convert to numpy array and apply Canny edge detection
+    image = np.array(image)
+    image = cv2.Canny(image, low_threshold, high_threshold)
+    image = image[:, :, None]
+    image = np.concatenate([image, image, image], axis=2)
+    canny_image = Image.fromarray(image)
+    
+    # Generate new image
+    pipe = load_canny_models()
+    output = pipe(
+        prompt="",  # Empty prompt for guess mode
+        image=canny_image,
+        guess_mode=True,
+        guidance_scale=guidance_scale
+    ).images[0]
+    
+    # Create image grid
+    grid = make_image_grid([Image.fromarray(np.array(image)), canny_image, output], rows=1, cols=3)
+    
+    return canny_image, output, grid
+
 # Create the Gradio interface
 with gr.Blocks(title="ControlNet Image Generation") as demo:
     gr.Markdown("# ControlNet Image Generation")
@@ -278,6 +300,34 @@ with gr.Blocks(title="ControlNet Image Generation") as demo:
                     eta
                 ],
                 outputs=[inpaint_generated, inpaint_grid]
+            )
+        
+        with gr.TabItem("Guess Mode"):
+            with gr.Row():
+                with gr.Column():
+                    guess_input = gr.Image(label="Input Image", type="pil")
+                    
+                    with gr.Accordion("Parameters", open=True):
+                        guess_low_threshold = gr.Slider(0, 255, value=100, label="Low Threshold")
+                        guess_high_threshold = gr.Slider(0, 255, value=200, label="High Threshold")
+                        guess_guidance_scale = gr.Slider(1.0, 20.0, value=3.0, label="Guidance Scale")
+                    
+                    guess_generate_btn = gr.Button("Generate Image")
+                
+                with gr.Column():
+                    guess_output = gr.Image(label="Canny Edge Detection", type="pil")
+                    guess_generated = gr.Image(label="Generated Image", type="pil")
+                    guess_grid = gr.Image(label="Image Grid", type="pil")
+            
+            guess_generate_btn.click(
+                fn=process_guess,
+                inputs=[
+                    guess_input,
+                    guess_low_threshold,
+                    guess_high_threshold,
+                    guess_guidance_scale
+                ],
+                outputs=[guess_output, guess_generated, guess_grid]
             )
 
 if __name__ == "__main__":
