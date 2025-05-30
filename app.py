@@ -18,6 +18,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import time
+from controlnet_aux import OpenposeDetector
 
 def create_retry_session(retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 504)):
     session = requests.Session()
@@ -287,6 +288,86 @@ def process_sdxl(image, low_threshold, high_threshold, prompt, negative_prompt, 
     
     return canny_image, output, grid
 
+def load_multi_controlnet_models():
+    try:
+        # Load pose detection model
+        openpose = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+        
+        # Load controlnet models
+        controlnets = [
+            load_model_with_retry(
+                ControlNetModel,
+                "thibaud/controlnet-openpose-sdxl-1.0",
+                torch_dtype=torch.float32
+            ),
+            load_model_with_retry(
+                ControlNetModel,
+                "diffusers/controlnet-canny-sdxl-1.0",
+                torch_dtype=torch.float32,
+                use_safetensors=True
+            ),
+        ]
+        
+        # Load VAE
+        vae = load_model_with_retry(
+            AutoencoderKL,
+            "madebyollin/sdxl-vae-fp16-fix",
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        
+        # Load pipeline
+        pipe = load_model_with_retry(
+            StableDiffusionXLControlNetPipeline,
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            controlnet=controlnets,
+            vae=vae,
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+        return pipe, openpose
+    except Exception as e:
+        raise Exception(f"Error loading MultiControlNet models: {str(e)}")
+
+def process_multi_controlnet(image, low_threshold, high_threshold, prompt, negative_prompt, num_inference_steps, guidance_scale, pose_scale, canny_scale, num_images):
+    try:
+        # Get pose detection
+        pipe, openpose = load_multi_controlnet_models()
+        pose_image = openpose(image)
+        
+        # Get Canny edges
+        image_np = np.array(image)
+        canny_image = cv2.Canny(image_np, low_threshold, high_threshold)
+        canny_image = canny_image[:, :, None]
+        canny_image = np.concatenate([canny_image, canny_image, canny_image], axis=2)
+        canny_image = Image.fromarray(canny_image)
+        
+        # Resize images to 1024x1024
+        pose_image = pose_image.resize((1024, 1024))
+        canny_image = canny_image.resize((1024, 1024))
+        
+        # Generate images
+        generator = torch.manual_seed(1)
+        outputs = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=[pose_image, canny_image],
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            num_images_per_prompt=num_images,
+            controlnet_conditioning_scale=[pose_scale, canny_scale]
+        ).images
+        
+        # Create image grid
+        grid_images = [image, canny_image, pose_image] + [img.resize((512, 512)) for img in outputs]
+        grid = make_image_grid(grid_images, rows=2, cols=3)
+        
+        return canny_image, pose_image, outputs[0], grid
+    except Exception as e:
+        raise Exception(f"Error in MultiControlNet processing: {str(e)}")
+
 # Create the Gradio interface
 with gr.Blocks(title="ControlNet Image Generation") as demo:
     gr.Markdown("# ControlNet Image Generation")
@@ -477,6 +558,53 @@ with gr.Blocks(title="ControlNet Image Generation") as demo:
                     controlnet_conditioning_scale
                 ],
                 outputs=[sdxl_output, sdxl_generated, sdxl_grid]
+            )
+        
+        with gr.TabItem("MultiControlNet"):
+            with gr.Row():
+                with gr.Column():
+                    multi_input = gr.Image(label="Input Image", type="pil")
+                    
+                    with gr.Accordion("Parameters", open=True):
+                        multi_low_threshold = gr.Slider(0, 255, value=100, label="Low Threshold")
+                        multi_high_threshold = gr.Slider(0, 255, value=200, label="High Threshold")
+                        multi_prompt = gr.Textbox(
+                            label="Prompt",
+                            value="a giant standing in a fantasy landscape, best quality"
+                        )
+                        multi_negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value="monochrome, lowres, bad anatomy, worst quality, low quality"
+                        )
+                        multi_num_inference_steps = gr.Slider(20, 50, value=25, label="Number of Inference Steps")
+                        multi_guidance_scale = gr.Slider(1.0, 20.0, value=7.5, label="Guidance Scale")
+                        pose_scale = gr.Slider(0.0, 2.0, value=1.0, label="Pose Control Scale")
+                        canny_scale = gr.Slider(0.0, 2.0, value=0.8, label="Canny Control Scale")
+                        num_images = gr.Slider(1, 4, value=3, step=1, label="Number of Images")
+                    
+                    multi_generate_btn = gr.Button("Generate Image")
+                
+                with gr.Column():
+                    multi_canny = gr.Image(label="Canny Edge Detection", type="pil")
+                    multi_pose = gr.Image(label="Pose Detection", type="pil")
+                    multi_generated = gr.Image(label="Generated Image", type="pil")
+                    multi_grid = gr.Image(label="Image Grid", type="pil")
+            
+            multi_generate_btn.click(
+                fn=process_multi_controlnet,
+                inputs=[
+                    multi_input,
+                    multi_low_threshold,
+                    multi_high_threshold,
+                    multi_prompt,
+                    multi_negative_prompt,
+                    multi_num_inference_steps,
+                    multi_guidance_scale,
+                    pose_scale,
+                    canny_scale,
+                    num_images
+                ],
+                outputs=[multi_canny, multi_pose, multi_generated, multi_grid]
             )
 
 if __name__ == "__main__":
