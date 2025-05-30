@@ -10,4 +10,5 @@ numpy==1.26.4
 accelerate==0.27.2
 safetensors==0.4.2
 huggingface_hub==0.20.3
-pydantic==1.10.13 
+pydantic==1.10.13
+controlnet_aux==0.0.7 

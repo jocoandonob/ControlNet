@@ -18,7 +18,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import time
+import socket
 from controlnet_aux import OpenposeDetector
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def create_retry_session(retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 504)):
     session = requests.Session()
@@ -40,6 +46,7 @@ def load_model_with_retry(model_class, model_id, **kwargs):
     
     for attempt in range(max_retries):
         try:
+            logger.info(f"Attempting to load model {model_id} (attempt {attempt + 1}/{max_retries})")
             return model_class.from_pretrained(
                 model_id,
                 **kwargs,
@@ -48,12 +55,18 @@ def load_model_with_retry(model_class, model_id, **kwargs):
                 resume_download=True,
                 max_retries=3
             )
-        except Exception as e:
+        except (requests.exceptions.RequestException, socket.error) as e:
             if attempt == max_retries - 1:
-                raise Exception(f"Failed to load model {model_id} after {max_retries} attempts: {str(e)}")
-            print(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
+                error_msg = f"Failed to load model {model_id} after {max_retries} attempts: {str(e)}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
             retry_delay *= 2
+        except Exception as e:
+            error_msg = f"Unexpected error loading model {model_id}: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
 
 def load_canny_models():
     try:
@@ -332,6 +345,7 @@ def load_multi_controlnet_models():
 
 def process_multi_controlnet(image, low_threshold, high_threshold, prompt, negative_prompt, num_inference_steps, guidance_scale, pose_scale, canny_scale, num_images):
     try:
+        logger.info("Starting MultiControlNet processing")
         # Get pose detection
         pipe, openpose = load_multi_controlnet_models()
         pose_image = openpose(image)
@@ -349,6 +363,7 @@ def process_multi_controlnet(image, low_threshold, high_threshold, prompt, negat
         
         # Generate images
         generator = torch.manual_seed(1)
+        logger.info("Generating images with MultiControlNet")
         outputs = pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -364,14 +379,18 @@ def process_multi_controlnet(image, low_threshold, high_threshold, prompt, negat
         grid_images = [image, canny_image, pose_image] + [img.resize((512, 512)) for img in outputs]
         grid = make_image_grid(grid_images, rows=2, cols=3)
         
+        logger.info("MultiControlNet processing completed successfully")
         return canny_image, pose_image, outputs[0], grid
     except Exception as e:
-        raise Exception(f"Error in MultiControlNet processing: {str(e)}")
+        error_msg = f"Error in MultiControlNet processing: {str(e)}"
+        logger.error(error_msg)
+        raise gr.Error(error_msg)
 
 # Create the Gradio interface
 with gr.Blocks(title="ControlNet Image Generation") as demo:
     gr.Markdown("# ControlNet Image Generation")
     gr.Markdown("⚠️ Running on CPU - Generation will be slower")
+    gr.Markdown("ℹ️ If you encounter connection errors, please check your internet connection and try again.")
     
     with gr.Tabs():
         with gr.TabItem("Canny Edge Detection"):
