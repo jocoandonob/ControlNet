@@ -7,57 +7,140 @@ from diffusers import (
     StableDiffusionControlNetPipeline,
     StableDiffusionControlNetImg2ImgPipeline,
     StableDiffusionControlNetInpaintPipeline,
+    StableDiffusionXLControlNetPipeline,
     ControlNetModel,
+    AutoencoderKL,
     UniPCMultistepScheduler
 )
 from transformers import pipeline
 import torch
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import time
+
+def create_retry_session(retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 504)):
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+def load_model_with_retry(model_class, model_id, **kwargs):
+    max_retries = 3
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            return model_class.from_pretrained(
+                model_id,
+                **kwargs,
+                use_auth_token=False,
+                local_files_only=False,
+                resume_download=True,
+                max_retries=3
+            )
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise Exception(f"Failed to load model {model_id} after {max_retries} attempts: {str(e)}")
+            print(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            retry_delay *= 2
 
 def load_canny_models():
-    controlnet = ControlNetModel.from_pretrained(
-        "lllyasviel/sd-controlnet-canny",
-        torch_dtype=torch.float32,
-        use_safetensors=True
-    )
-    pipe = StableDiffusionControlNetPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        controlnet=controlnet,
-        torch_dtype=torch.float32,
-        use_safetensors=True
-    )
-    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
-    return pipe
+    try:
+        controlnet = load_model_with_retry(
+            ControlNetModel,
+            "lllyasviel/sd-controlnet-canny",
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe = load_model_with_retry(
+            StableDiffusionControlNetPipeline,
+            "runwayml/stable-diffusion-v1-5",
+            controlnet=controlnet,
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+        return pipe
+    except Exception as e:
+        raise Exception(f"Error loading Canny models: {str(e)}")
 
 def load_depth_models():
-    depth_estimator = pipeline("depth-estimation")
-    controlnet = ControlNetModel.from_pretrained(
-        "lllyasviel/control_v11f1p_sd15_depth",
-        torch_dtype=torch.float32,
-        use_safetensors=True
-    )
-    pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        controlnet=controlnet,
-        torch_dtype=torch.float32,
-        use_safetensors=True
-    )
-    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
-    return pipe, depth_estimator
+    try:
+        depth_estimator = pipeline("depth-estimation")
+        controlnet = load_model_with_retry(
+            ControlNetModel,
+            "lllyasviel/control_v11f1p_sd15_depth",
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe = load_model_with_retry(
+            StableDiffusionControlNetImg2ImgPipeline,
+            "runwayml/stable-diffusion-v1-5",
+            controlnet=controlnet,
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+        return pipe, depth_estimator
+    except Exception as e:
+        raise Exception(f"Error loading depth models: {str(e)}")
 
 def load_inpaint_models():
-    controlnet = ControlNetModel.from_pretrained(
-        "lllyasviel/control_v11p_sd15_inpaint",
-        torch_dtype=torch.float32,
-        use_safetensors=True
-    )
-    pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        controlnet=controlnet,
-        torch_dtype=torch.float32,
-        use_safetensors=True
-    )
-    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
-    return pipe
+    try:
+        controlnet = load_model_with_retry(
+            ControlNetModel,
+            "lllyasviel/control_v11p_sd15_inpaint",
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe = load_model_with_retry(
+            StableDiffusionControlNetInpaintPipeline,
+            "runwayml/stable-diffusion-v1-5",
+            controlnet=controlnet,
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+        return pipe
+    except Exception as e:
+        raise Exception(f"Error loading inpainting models: {str(e)}")
+
+def load_sdxl_models():
+    try:
+        controlnet = load_model_with_retry(
+            ControlNetModel,
+            "diffusers/controlnet-canny-sdxl-1.0",
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        vae = load_model_with_retry(
+            AutoencoderKL,
+            "madebyollin/sdxl-vae-fp16-fix",
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe = load_model_with_retry(
+            StableDiffusionXLControlNetPipeline,
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            controlnet=controlnet,
+            vae=vae,
+            torch_dtype=torch.float32,
+            use_safetensors=True
+        )
+        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+        return pipe
+    except Exception as e:
+        raise Exception(f"Error loading SDXL models: {str(e)}")
 
 def get_depth_map(image, depth_estimator):
     # Convert PIL image to RGB if it's not
@@ -173,6 +256,30 @@ def process_guess(image, low_threshold, high_threshold, guidance_scale):
         image=canny_image,
         guess_mode=True,
         guidance_scale=guidance_scale
+    ).images[0]
+    
+    # Create image grid
+    grid = make_image_grid([Image.fromarray(np.array(image)), canny_image, output], rows=1, cols=3)
+    
+    return canny_image, output, grid
+
+def process_sdxl(image, low_threshold, high_threshold, prompt, negative_prompt, num_inference_steps, guidance_scale, controlnet_conditioning_scale):
+    # Convert to numpy array and apply Canny edge detection
+    image = np.array(image)
+    image = cv2.Canny(image, low_threshold, high_threshold)
+    image = image[:, :, None]
+    image = np.concatenate([image, image, image], axis=2)
+    canny_image = Image.fromarray(image)
+    
+    # Generate new image
+    pipe = load_sdxl_models()
+    output = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        image=canny_image,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        controlnet_conditioning_scale=controlnet_conditioning_scale
     ).images[0]
     
     # Create image grid
@@ -328,6 +435,48 @@ with gr.Blocks(title="ControlNet Image Generation") as demo:
                     guess_guidance_scale
                 ],
                 outputs=[guess_output, guess_generated, guess_grid]
+            )
+        
+        with gr.TabItem("SDXL ControlNet"):
+            with gr.Row():
+                with gr.Column():
+                    sdxl_input = gr.Image(label="Input Image", type="pil")
+                    
+                    with gr.Accordion("Parameters", open=True):
+                        sdxl_low_threshold = gr.Slider(0, 255, value=100, label="Low Threshold")
+                        sdxl_high_threshold = gr.Slider(0, 255, value=200, label="High Threshold")
+                        sdxl_prompt = gr.Textbox(
+                            label="Prompt",
+                            value="aerial view, a futuristic research complex in a bright foggy jungle, hard lighting"
+                        )
+                        sdxl_negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            value="low quality, bad quality, sketches"
+                        )
+                        sdxl_num_inference_steps = gr.Slider(20, 50, value=30, label="Number of Inference Steps")
+                        sdxl_guidance_scale = gr.Slider(1.0, 20.0, value=7.5, label="Guidance Scale")
+                        controlnet_conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, label="ControlNet Conditioning Scale")
+                    
+                    sdxl_generate_btn = gr.Button("Generate Image")
+                
+                with gr.Column():
+                    sdxl_output = gr.Image(label="Canny Edge Detection", type="pil")
+                    sdxl_generated = gr.Image(label="Generated Image", type="pil")
+                    sdxl_grid = gr.Image(label="Image Grid", type="pil")
+            
+            sdxl_generate_btn.click(
+                fn=process_sdxl,
+                inputs=[
+                    sdxl_input,
+                    sdxl_low_threshold,
+                    sdxl_high_threshold,
+                    sdxl_prompt,
+                    sdxl_negative_prompt,
+                    sdxl_num_inference_steps,
+                    sdxl_guidance_scale,
+                    controlnet_conditioning_scale
+                ],
+                outputs=[sdxl_output, sdxl_generated, sdxl_grid]
             )
 
 if __name__ == "__main__":
